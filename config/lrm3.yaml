@@ -1,0 +1,15 @@
+model:
+  alpha: 0.5
+  steps: 2
+  lrm_ind: 3
+
+data:
+  train_dataset: /n/alvarez_lab_tier1/Users/alvarez/datasets/imagenet1k-ffcv/imagenet1k_train_jpg_q100_s256_lmax512_crop.ffcv
+  val_dataset: /n/alvarez_lab_tier1/Users/alvarez/datasets/imagenet1k-ffcv/imagenet1k_val_jpg_q100_s256_lmax512_crop.ffcv
+  in_memory: 1
+
+dist:
+  ngpus: 1
+
+logging:
+  use_wandb: 1
