@@ -932,10 +932,10 @@ class ImageNetTrainer:
                         with ch.no_grad():
                             teacher_outputs, _ = self.teacher(images_big)
                             teacher_outputs = [teacher_output.view(2, batch_size, -1) for teacher_output in teacher_outputs]
-                        embeddings_big, _, _ = model(images_big, predictor=True)
+                        embeddings_big, list_representation, _ = model(images_big, predictor=True)
                     else:
                         # Compute embedding in bigger crops
-                        embeddings_big, _, _ = model(images_big)
+                        embeddings_big, list_representation, _ = model(images_big)
                     
                     # Compute Loss
                     step_num = 0
@@ -991,12 +991,10 @@ class ImageNetTrainer:
                 self.optimizer_probes.zero_grad(set_to_none=True)
                 # Compute embeddings vectors
                 with ch.no_grad():
-                    with autocast(enabled=bool(use_amp)):
-                        embeddings, list_representation, _ = model(images_big_0)
                     
                     # if supervised, track loss and accuracy based on embeddings
                     if self.supervised_loss:
-                        for p,embedding in enumerate(embeddings):                            
+                        for p,embedding in enumerate(embeddings_big):                            
                             current_loss = self.sup_loss(embedding.detach(), labels_big.detach())
                             self.train_meters['loss_classif_trn_p'+str(p)](current_loss.detach())
                             for k in ['top_1_trn_p'+str(p), 'top_5_trn_p'+str(p)]:
