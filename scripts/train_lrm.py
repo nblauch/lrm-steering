@@ -113,6 +113,7 @@ Section('logging', 'how to log stuff').params(
     log_level=Param(int, '0 if only at end 1 otherwise', default=2),
     checkpoint_freq=Param(int, 'When saving checkpoints', default=5),
     use_wandb=Param(int, 'use wandb?', default=0),
+    no_probes=Param(int, 'do not train linear probes', default=0),
 )
 
 Section('logging.wandb', 'wandb options').params(
@@ -421,8 +422,9 @@ class ImageNetTrainer:
     @param('data.train_dataset')
     @param('data.val_dataset')
     @param('data.num_classes')
+    @param('logging.no_probes')
     def __init__(self, gpu, ngpus_per_node, world_size, dist_url, distributed, batch_size, label_smoothing, loss, train_probes_only, 
-                 epochs, train_dataset, val_dataset, num_classes):
+                 epochs, train_dataset, val_dataset, num_classes, no_probes):
         
         self.all_params = get_current_config()
         ch.cuda.set_device(gpu)
@@ -463,12 +465,16 @@ class ImageNetTrainer:
         
         # Create linear probes (trained without label smoothing)
         self.sup_loss = nn.CrossEntropyLoss()
-        self.probes = LinearProbes(get_model(self.model, distributed).mlp_spec, num_classes=self.num_classes)
-        self.probes = self.probes.to(memory_format=ch.channels_last)
-        self.probes = self.probes.to(self.gpu)
-        if distributed:
-            self.probes = ch.nn.parallel.DistributedDataParallel(self.probes, device_ids=[self.gpu])
-        self.optimizer_probes = ch.optim.AdamW(self.probes.parameters(), lr=1e-4)
+        if no_probes:
+            self.probes = None
+            self.optimizer_probes = None
+        else:
+            self.probes = LinearProbes(get_model(self.model, distributed).mlp_spec, num_classes=self.num_classes)
+            self.probes = self.probes.to(memory_format=ch.channels_last)
+            self.probes = self.probes.to(self.gpu)
+            if distributed:
+                self.probes = ch.nn.parallel.DistributedDataParallel(self.probes, device_ids=[self.gpu])
+            self.optimizer_probes = ch.optim.AdamW(self.probes.parameters(), lr=1e-4)
         
         # Load models if checkpoint exists
         self.load_checkpoint()
@@ -765,7 +771,7 @@ class ImageNetTrainer:
             ch.save(dict(
                 epoch=epoch,
                 state_dict=self.model.state_dict(),
-                probes=self.probes.state_dict(),
+                probes=self.probes.state_dict() if self.probes is not None else None,
                 params=self.params_dict()
             ), self.log_folder / 'final_weights.pth')
             
@@ -828,8 +834,9 @@ class ImageNetTrainer:
             self.model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
             if not train_probes_only: # train_probes_only means train_probes_only_from_scratch
-                self.probes.load_state_dict(ckpt["probes"])
-                self.optimizer_probes.load_state_dict(ckpt["optimizer_probes"])
+                if self.probes is not None:
+                    self.probes.load_state_dict(ckpt["probes"])
+                    self.optimizer_probes.load_state_dict(ckpt["optimizer_probes"])
             else:
                 # training probes only from checkpoint
                 self.start_epoch = 0
@@ -857,8 +864,8 @@ class ImageNetTrainer:
                 epoch=epoch, 
                 model=self.model.state_dict(), 
                 optimizer=self.optimizer.state_dict(),
-                probes=self.probes.state_dict(), 
-                optimizer_probes=self.optimizer_probes.state_dict(),
+                probes=self.probes.state_dict() if self.probes is not None else None, 
+                optimizer_probes=self.optimizer_probes.state_dict() if self.optimizer_probes is not None else None,
                 params=params
             )
             save_name = f"model.pth"
@@ -966,42 +973,43 @@ class ImageNetTrainer:
             # ======================================================================                    
             #  Online linear probes training
             # ======================================================================
-            self.optimizer.zero_grad(set_to_none=True)
-            self.optimizer_probes.zero_grad(set_to_none=True)
-            # Compute embeddings vectors
-            with ch.no_grad():
+            if self.probes is not None:
+                self.optimizer.zero_grad(set_to_none=True)
+                self.optimizer_probes.zero_grad(set_to_none=True)
+                # Compute embeddings vectors
+                with ch.no_grad():
+                    with autocast(enabled=bool(use_amp)):
+                        embeddings, list_representation, _ = model(images_big_0)
+                    
+                    # if supervised, track loss and accuracy based on embeddings
+                    if self.supervised_loss:
+                        for p,embedding in enumerate(embeddings):                            
+                            current_loss = self.sup_loss(embedding.detach(), labels_big.detach())
+                            self.train_meters['loss_classif_trn_p'+str(p)](current_loss.detach())
+                            for k in ['top_1_trn_p'+str(p), 'top_5_trn_p'+str(p)]:
+                                self.train_meters[k](embedding.detach(), labels_big.detach())
+                                
+                # Train probes
                 with autocast(enabled=bool(use_amp)):
-                    embeddings, list_representation, _ = model(images_big_0)
+                    # Real value classification
+                    list_outputs = self.probes(list_representation)
+                    loss_classif = 0.
+                    for l in range(len(list_outputs)):
+                        # Compute classif loss
+                        current_loss = self.sup_loss(list_outputs[l], labels_big)
+                        loss_classif = loss_classif + current_loss
+                        self.train_meters['loss_classif_layer'+str(l)](current_loss.detach())
+                        for k in ['top_1_layer'+str(l), 'top_5_layer'+str(l)]:
+                            self.train_meters[k](list_outputs[l].detach(), labels_big)
                 
-                # if supervised, track loss and accuracy based on embeddings
-                if self.supervised_loss:
-                    for p,embedding in enumerate(embeddings):                            
-                        current_loss = self.sup_loss(embedding.detach(), labels_big.detach())
-                        self.train_meters['loss_classif_trn_p'+str(p)](current_loss.detach())
-                        for k in ['top_1_trn_p'+str(p), 'top_5_trn_p'+str(p)]:
-                            self.train_meters[k](embedding.detach(), labels_big.detach())
-                            
-            # Train probes
-            with autocast(enabled=bool(use_amp)):
-                # Real value classification
-                list_outputs = self.probes(list_representation)
-                loss_classif = 0.
-                for l in range(len(list_outputs)):
-                    # Compute classif loss
-                    current_loss = self.sup_loss(list_outputs[l], labels_big)
-                    loss_classif = loss_classif + current_loss
-                    self.train_meters['loss_classif_layer'+str(l)](current_loss.detach())
-                    for k in ['top_1_layer'+str(l), 'top_5_layer'+str(l)]:
-                        self.train_meters[k](list_outputs[l].detach(), labels_big)
-            
-            self.scaler.scale(loss_classif).backward()
-            if clip_grad > 0:
-                self.scaler.unscale_(self.optimizer)
-                ch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                self.scaler.scale(loss_classif).backward()
+                if clip_grad > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    ch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
 
-            self.scaler.step(self.optimizer_probes)
-            self.scaler.update()
-            check_scaler_scale(self.scaler)
+                self.scaler.step(self.optimizer_probes)
+                self.scaler.update()
+                check_scaler_scale(self.scaler)
 
             # Logging
             if log_level > 0:
@@ -1016,8 +1024,9 @@ class ImageNetTrainer:
                 if log_level > 1:
                     names += ['loss']
                     values += [f'{total_loss_train.item():.3f}']
-                    names += ['loss_c']
-                    values += [f'{loss_classif.item():.3f}']
+                    if self.probes is not None:
+                        names += ['loss_c']
+                        values += [f'{loss_classif.item():.3f}']
 
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
@@ -1039,15 +1048,16 @@ class ImageNetTrainer:
             with autocast(enabled=bool(use_amp)):
                 for images, target in tqdm(self.val_loader):
                     embeddings, list_representation, _ = model(images)
-                    list_outputs = self.probes(list_representation)
-                    loss_classif = 0.
-                    for l in range(len(list_outputs)):
-                        # Compute classif loss
-                        current_loss = self.sup_loss(list_outputs[l], target)
-                        loss_classif += current_loss
-                        self.val_meters['loss_classif_val_layer'+str(l)](current_loss.detach())
-                        for k in ['top_1_val_layer'+str(l), 'top_5_val_layer'+str(l)]:
-                            self.val_meters[k](list_outputs[l].detach(), target)
+                    if self.probes is not None:
+                        list_outputs = self.probes(list_representation)
+                        loss_classif = 0.
+                        for l in range(len(list_outputs)):
+                            # Compute classif loss
+                            current_loss = self.sup_loss(list_outputs[l], target)
+                            loss_classif += current_loss
+                            self.val_meters['loss_classif_val_layer'+str(l)](current_loss.detach())
+                            for k in ['top_1_val_layer'+str(l), 'top_5_val_layer'+str(l)]:
+                                self.val_meters[k](list_outputs[l].detach(), target)
                     
                     if self.supervised_loss:
                         for p,embedding in enumerate(embeddings):                            
