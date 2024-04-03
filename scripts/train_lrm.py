@@ -64,6 +64,7 @@ from pdb import set_trace
 import inspect
 
 Section('model', 'model details').params(
+    arch=Param(str, 'model architecture', default='alexnet2023_nobn_lrm'),
     alpha=Param(float, 'weighting across time steps for LRMs (t1: (1-alpha), t2: alpha), between 0 and 1', default=0.5),
     forward_passes=Param(int, 'number of forward passes. forward_passes>2 only comp. with alpha=0.5', default=2),
     mlp=Param(str, 'mlp', default='8192-8192-8192'),
@@ -806,7 +807,8 @@ class ImageNetTrainer:
     @param('training.distributed')
     def create_model_and_scaler(self, loss, use_amp, distributed, model_config):
         scaler = GradScaler(enabled=bool(use_amp), growth_interval=100)
-        model = task_networks_lrm.__dict__["alexnet2023_nobn_lrm"](loss=loss, **model_config)
+        arch = model_config.pop('arch')
+        model = task_networks_lrm.__dict__[arch](loss=loss, **model_config)
         assert model.loss == loss, f"TaskNetwork loss ({model.loss}) must match training.loss ({loss})"
         model = model.to(memory_format=ch.channels_last)
         model = model.to(self.gpu)
