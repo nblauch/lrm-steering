@@ -2,6 +2,8 @@ model:
   alpha: 0.5
   steps: 2
   lrm_ind: 3
+  mlp: 4096-4096
+  arch: alexnet2023_lrm
 
 data:
   train_dataset: /n/alvarez_lab_tier1/Users/alvarez/datasets/imagenet1k-ffcv/imagenet1k_train_jpg_q100_s256_lmax512_crop.ffcv
@@ -13,3 +15,13 @@ dist:
 
 logging:
   use_wandb: 1
+  no_probes: 1
+
+training:
+  distributed: 0
+  loss: supervised
+  batch_size: 512
+
+resolution:
+  min_res: 224
+
