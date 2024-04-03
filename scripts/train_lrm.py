@@ -81,7 +81,7 @@ Section('resolution', 'resolution scheduling').params(
 Section('data', 'data related stuff').params(
     train_dataset=Param(str, '.dat file to use for training', required=True),
     val_dataset=Param(str, '.dat file to use for validation', default=""),
-    num_classes=Param(int, 'The number of image classes', default=1000),
+    num_classes=Param(int, 'The number of image classes. If -1, we try to determine automatically, and if that fails, we default to 1000', default=-1),
     num_workers=Param(int, 'The number of workers', default=NUMBA_NUM_THREADS - 2),
     in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True),
 )
@@ -444,10 +444,23 @@ class ImageNetTrainer:
         self.index_labels = 1
         self.train_loader = self.create_train_loader_ssl(train_dataset)
         self.num_train_exemples = self.train_loader.indices.shape[0]
-        self.num_classes = num_classes
+        if num_classes == -1:
+            try:
+                self.num_classes = int(np.load(os.path.join(os.path.dirname(train_dataset), 'num_classes.npy')))
+            except Exception as e:
+                print(e)
+                print('num_classes.npy not found, assuming 1000')
+                self.num_classes = 1000
+        else:
+            self.num_classes = num_classes
         self.val_loader = self.create_val_loader(val_dataset)
-        self.vis_loader = self.create_val_loader(val_dataset, subset=0.1)
         print("NUM TRAINING EXAMPLES:", self.num_train_exemples)
+
+        # add linear readout if supervised, folded into the MLP
+        if self.all_params['training.loss'] == 'supervised':
+            if self.all_params['model.mlp'].split('-')[-1] != str(self.num_classes):
+                config.collect({'model.mlp': config['model.mlp'] + '-' + str(self.num_classes)})
+                print("Supervised training, adding linear readout to MLP:", self.all_params['model.mlp'])
         
         # Create SSL model, scaler, and optimizer
         model_config = {key.replace('model.', '') : value for key, value in self.params_dict().items() if key.startswith('model.')}
