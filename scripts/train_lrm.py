@@ -69,6 +69,7 @@ Section('model', 'model details').params(
     forward_passes=Param(int, 'number of forward passes. forward_passes>2 only comp. with alpha=0.5', default=2),
     mlp=Param(str, 'mlp', default='8192-8192-8192'),
     lrm_ind=Param(int, 'which LRM model to use', default=3),
+    norm=Param(str, 'normalization layer; not used if nobn in arch', default='batch'),
 )
 
 Section('resolution', 'resolution scheduling').params(
@@ -827,6 +828,8 @@ class ImageNetTrainer:
     def create_model_and_scaler(self, loss, use_amp, distributed, model_config):
         scaler = GradScaler(enabled=bool(use_amp), growth_interval=100)
         arch = model_config.pop('arch')
+        if 'nobn' in arch:
+            model_config.pop('norm')
         model = task_networks_lrm.__dict__[arch](loss=loss, **model_config)
         assert model.loss == loss, f"TaskNetwork loss ({model.loss}) must match training.loss ({loss})"
         model = model.to(memory_format=ch.channels_last)
