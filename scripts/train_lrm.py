@@ -70,6 +70,7 @@ Section('model', 'model details').params(
     mlp=Param(str, 'mlp', default='8192-8192-8192'),
     lrm_ind=Param(int, 'which LRM model to use', default=3),
     norm=Param(str, 'normalization layer; not used if nobn in arch', default='batch'),
+    norm_mlp=Param(int, 'use norm for MLP layers?', default=1),
 )
 
 Section('resolution', 'resolution scheduling').params(
